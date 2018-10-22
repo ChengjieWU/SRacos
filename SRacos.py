@@ -1,5 +1,7 @@
 import random
 import copy
+import operator
+import datetime
 
 
 class SRacos:
@@ -7,32 +9,43 @@ class SRacos:
     def __init__(self):
         pass
 
-    def opt(self, objective, dimension, budget, k, r, prob):
-        data = list()
-        for i in range(r):
-            x = self.uniform_sample(dimension, None)
-            y = objective.eval(x)
-            data.append((x, y))
-        positive_data, negative_data, best_solution = self.selection(data, k)
+    def opt(self, objective, dimension, budget, k, r, prob, max_coordinates):
+        """
+        Optimize the given objective.
+        :param objective: An object which has an eval method.
+        :param dimension: A two dimensional list. See README.
+        :param budget: Number of samples.
+        :param k: Positive region size.
+        :param r: Pool size.
+        :param prob: Probability to sample from positive region.
+        :param max_coordinates: Maximum number of uncertain coordinates.
+        :return: The best solution, a tuple (x, f(x)).
+        """
+        if k < 1 or k >= r or r > budget:
+            raise ValueError
+        x_list = self._uniform_sample_without_replicates(dimension, None, None, r)
+        data = self._evaluate_list(x_list, objective)
+        positive_data, negative_data = self._selection(data, k)
+        best_solution = positive_data[0]
         for t in range(budget - r):
             if random.random() < prob:
-                x = self.sample_from_racos(dimension, positive_data, negative_data)
+                x = self._sample_from_racos(dimension, positive_data, negative_data, max_coordinates)
             else:
-                x = self.uniform_sample(dimension, None)
+                x = self._uniform_sample_without_replicates(dimension, None, positive_data + negative_data, 1)
             y = objective.eval(x)
-            inferior = self.replace_wr((x, y), positive_data, 'pos')
-            _ = self.replace_wr(inferior, negative_data, 'neg')
+            inferior = self._replace_wr((x, y), positive_data, 'pos')
+            _ = self._replace_wr(inferior, negative_data, 'neg')
             best_solution = positive_data[0]
         return best_solution
 
-    def sample_from_racos(self, dimension, positive_data, negative_data):
+    def _sample_from_racos(self, dimension, positive_data, negative_data, max_coordinated):
         sample_region = copy.deepcopy(dimension)
         x_positive = positive_data[random.randint(0, len(positive_data) - 1)]
         len_negative = len(negative_data)
         index_set = list(range(len(dimension)))
         types = list(map(lambda x: x[2], dimension))
         order = list(map(lambda x: x[3], dimension))
-        while len_negative > 0:
+        while len_negative > 0 and len(index_set) > 0:
             k = index_set[random.randint(0, len(index_set) - 1)]
             x_pos_k = x_positive[0][k]
             # continuous
@@ -68,7 +81,7 @@ class SRacos:
             # discrete
             else:
                 if order[k] is True:
-                    x_negative = negative_data[random.randint(0, len_negative - 1)]
+                    x_negative = [random.randint(0, len_negative - 1)]
                     x_neg_k = x_negative[0][k]
                     if x_pos_k < x_neg_k:
                         # different from continuous version
@@ -111,10 +124,17 @@ class SRacos:
                             i += 1
                     if delete != 0:
                         index_set.remove(k)
-        return self.uniform_sample(sample_region, x_positive)
+        while len(index_set) > max_coordinated:
+            k = index_set[random.randint(0, len(index_set) - 1)]
+            sample_region[k][0] = x_positive[0][k]
+            sample_region[k][1] = x_positive[0][k]
+            sample_region[k][4] = [x_positive[0][k], ]
+            index_set.remove(k)
+        x_list = [x[0] for x in positive_data] + [x[0] for x in negative_data]
+        return self._uniform_sample_without_replicates(sample_region, x_positive, x_list, 1)
 
     @staticmethod
-    def uniform_sample(dimension, x_pos):
+    def _uniform_sample(dimension, x_pos):
         x = list()
         for i in range(len(dimension)):
             if dimension[i][2] is True:
@@ -126,20 +146,53 @@ class SRacos:
                     rand_index = random.randint(0, len(dimension[i][4]) - 1)
                     value = dimension[i][4][rand_index]
                 else:
-                    value = x_pos[i]
+                    value = x_pos[0][i]
             x.append(value)
         return x
 
+    def _uniform_sample_without_replicates(self, dimension, x_pos, data, num):
+        if data is None:
+            data = list()
+        if num == 1:
+            start_time = datetime.datetime.now()
+            x = self._uniform_sample(dimension, x_pos)
+            while any([operator.eq(x, t) for t in data]):
+                current_time = datetime.datetime.now()
+                if (current_time - start_time).total_seconds() > 1:
+                    print('timeout')
+                    exit(-1)
+                x = self._uniform_sample(dimension, x_pos)
+            return x
+        elif num > 1:
+            x_list = list()
+            for i in range(num):
+                start_time = datetime.datetime.now()
+                x = self._uniform_sample(dimension, x_pos)
+                while any([operator.eq(x, t) for t in data + x_list]):
+                    current_time = datetime.datetime.now()
+                    if (current_time - start_time).total_seconds() > 1:
+                        print('timeout')
+                        exit(-1)
+                    x = self._uniform_sample(dimension, x_pos)
+                x_list.append(x)
+            return x_list
+        else:
+            raise ValueError
+
     @staticmethod
-    def selection(data, k):
+    def _evaluate_list(x_list, objective):
+        return [(x, objective.eval(x)) for x in x_list]
+
+    @staticmethod
+    def _selection(data, k):
         new_data = sorted(data, key=lambda item: item[1])
         positive_data = new_data[0: k]
         negative_data = new_data[k: len(new_data)]
-        return positive_data, negative_data, positive_data[0]
+        return positive_data, negative_data
 
-    def replace_wr(self, item, data, iset_type):
+    def _replace_wr(self, item, data, iset_type):
         if iset_type == 'pos':
-            index = self.binary_search(data, item, 0, len(data) - 1)
+            index = self._binary_search(data, item, 0, len(data) - 1)
             data.insert(index, item)
             worst_ele = data.pop()
             return worst_ele
@@ -154,13 +207,10 @@ class SRacos:
             else:
                 worst_ele = item
             return worst_ele
-        else:
-            print('error! wait for handling')
 
-    def binary_search(self, iset, x, begin, end):
+    def _binary_search(self, iset, x, begin, end):
         """
         Find the first element larger than x.
-
         :param iset: a solution set
         :param x: a Solution object
         :param begin: begin position
@@ -176,7 +226,7 @@ class SRacos:
             return end
         mid = (begin + end) // 2
         if x_value <= iset[mid][1]:
-            return self.binary_search(iset, x, begin, mid)
+            return self._binary_search(iset, x, begin, mid)
         else:
-            return self.binary_search(iset, x, mid, end)
+            return self._binary_search(iset, x, mid, end)
 
